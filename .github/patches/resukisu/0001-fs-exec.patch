@@ -1,0 +1,35 @@
+--- a/fs/exec.c
++++ b/fs/exec.c
+@@ -1830,6 +1830,12 @@
+ 	return retval;
+ }
+ 
++#ifdef CONFIG_KSU_MANUAL_HOOK
++__attribute__((hot))
++extern int ksu_handle_execveat(int *fd, struct filename **filename_ptr,
++				void *argv, void *envp, int *flags);
++#endif
++
+ int do_execve(struct filename *filename,
+ 	const char __user *const __user *__argv,
+ 	const char __user *const __user *__envp)
+@@ -1849,6 +1855,9 @@
+ 	}
+ 	return execve_ret;
+ #else
++#ifdef CONFIG_KSU_MANUAL_HOOK
++	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
++#endif
+ 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ #endif
+ }
+@@ -1877,6 +1886,9 @@
+ 		.is_compat = true,
+ 		.ptr.compat = __envp,
+ 	};
++#ifdef CONFIG_KSU_MANUAL_HOOK // 32-bit ksud and 32-on-64 support
++	ksu_handle_execveat((int *)AT_FDCWD, &filename, &argv, &envp, 0);
++#endif
+ 	return do_execveat_common(AT_FDCWD, filename, argv, envp, 0);
+ }
+ 

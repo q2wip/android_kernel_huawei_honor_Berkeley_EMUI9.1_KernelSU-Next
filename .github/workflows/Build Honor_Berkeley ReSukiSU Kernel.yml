@@ -1,0 +1,100 @@
+name: Build Honor_Berkeley ReSukiSU Kernel
+on:
+  workflow_dispatch:
+  schedule:
+    # Every Saturday 12:00 UTC
+    - cron: '00 12 * * 6'
+
+jobs:
+  build:
+    runs-on: ubuntu-22.04
+    env:
+      CCACHE_COMPILERCHECK: "%compiler% -dumpmachine; %compiler% -dumpversion"
+      CCACHE_NOHASHDIR: "true"
+      CCACHE_MAXSIZE: "2G"
+      CCACHE_HARDLINK: "true"
+      KERNEL_CMDLINE: "ARCH=arm64 CROSS_COMPILE=aarch64-linux-android- O=out"
+      DEFCONFIG: "kirin970_ReSukiSU_defconfig"
+    steps:
+    - name: Checkout
+      uses: actions/checkout@v4
+      with:
+        fetch-depth: 1
+
+    - name: Set up ccache
+      uses: hendrikmuhs/ccache-action@v1.2
+
+    - name: Install dependencies
+      run: |
+        sudo apt-get update -y
+        sudo apt install -y binutils make python2 libssl-dev flex unzip ca-certificates \
+          xz-utils mkbootimg cpio device-tree-compiler git git-lfs bc bison build-essential \
+          ccache curl g++-9 gcc-9 gnupg gperf imagemagick lib32ncurses5-dev lib32readline-dev \
+          lib32z1-dev libelf-dev liblz4-tool libncurses5 libncurses5-dev libsdl1.2-dev \
+          libxml2 libxml2-utils lzop pngcrush rsync schedtool squashfs-tools xsltproc zip zlib1g-dev
+        git clone https://github.com/Coconutat/ToolChains.git --depth=1 -b google_gcc_pie
+        sudo update-alternatives --install /usr/bin/gcc gcc /usr/bin/gcc-9 100
+        sudo update-alternatives --install /usr/bin/g++ g++ /usr/bin/g++-9 100
+
+    - name: GetTime
+      id: get_time
+      run: echo "TIME=$(TZ=UTC-8 date +%m%d%H%M)" >> $GITHUB_OUTPUT
+
+    - name: Apply ReSukiSU manual-hook patches
+      run: |
+        for p in .github/patches/resukisu/*.patch; do
+          echo ">>> applying $p"
+          patch -p1 --forward < "$p"
+        done
+
+    - name: Prepare ReSukiSU defconfig
+      run: |
+        D="arch/arm64/configs/${DEFCONFIG}"
+        cp arch/arm64/configs/kirin970_KSU_NEXT_defconfig "$D"
+        sed -i '/^CONFIG_KSU/d; /^# CONFIG_KSU/d' "$D"
+        printf '\n# KernelSU (ReSukiSU / BakaSU manual hooks)\nCONFIG_KSU=y\nCONFIG_KSU_DEBUG=y\nCONFIG_KSU_MANUAL_HOOK=y\nCONFIG_KSU_MANUAL_HOOK_AUTO_SETUID_HOOK=y\nCONFIG_KSU_MANUAL_HOOK_AUTO_INITRC_HOOK=y\nCONFIG_KSU_MANUAL_HOOK_AUTO_INPUT_HOOK=y\nCONFIG_KALLSYMS_ALL=y\n' >> "$D"
+        echo "=== tail of $D ==="
+        tail -n 12 "$D"
+
+    - name: Integrate ReSukiSU (BakaSU)
+      run: |
+        rm -rf KernelSU drivers/kernelsu
+        curl -LSs "https://raw.githubusercontent.com/ReSukiSU/ReSukiSU/main/kernel/setup.sh" | bash
+        echo "=== drivers/kernelsu ==="
+        ls -l drivers/kernelsu
+        grep -n kernelsu drivers/Makefile drivers/Kconfig
+
+    - name: Build ReSukiSU Kernel
+      run: |
+        sudo ln -sf /usr/bin/python2.7 /usr/bin/python
+        rm -rf include/config
+        export PATH=$(pwd)/ToolChains/bin/:$PATH/
+        export ARCH=arm64
+        export SUBARCH=arm64
+        sudo chmod -R 777 "$(pwd)/"
+        make $KERNEL_CMDLINE "$DEFCONFIG"
+        echo "=== relevant .config ==="
+        grep -E 'CONFIG_KSU|CONFIG_KALLSYMS_ALL|CONFIG_KPROBES|CONFIG_KSU_MANUAL' out/.config || true
+        make $KERNEL_CMDLINE -j$(nproc --all)
+
+    - name: Pack ReSukiSU boot images
+      run: |
+        TIME="${{ steps.get_time.outputs.TIME }}"
+        CMDLINE="loglevel=4 initcall_debug=n page_tracker=on slub_min_objects=16 unmovable_isolate1=2:192M,3:224M,4:256M printktimer=0xfff0a000,0x534,0x538"
+        tools/mkbootimg --kernel out/arch/arm64/boot/Image.gz --base 0x0 \
+          --cmdline "$CMDLINE androidboot.selinux=enforcing buildvariant=user" \
+          --tags_offset 0x07A00000 --kernel_offset 0x00080000 --ramdisk_offset 0x07c00000 \
+          --header_version 1 --os_version 9 --os_patch_level "$(date +%Y-%m-%d)" \
+          --output "Kernel-ReSukiSU-enforcing-${TIME}.img"
+        tools/mkbootimg --kernel out/arch/arm64/boot/Image.gz --base 0x0 \
+          --cmdline "$CMDLINE androidboot.selinux=permissive buildvariant=user" \
+          --tags_offset 0x07A00000 --kernel_offset 0x00080000 --ramdisk_offset 0x07c00000 \
+          --header_version 1 --os_version 9 --os_patch_level "$(date +%Y-%m-%d)" \
+          --output "Kernel-ReSukiSU-permissive-${TIME}.img"
+        ls -lh Kernel-ReSukiSU-*.img
+
+    - name: Upload ReSukiSU Kernel
+      uses: actions/upload-artifact@v4
+      with:
+        name: Kernel-ReSukiSU-${{ steps.get_time.outputs.TIME }}
+        path: "Kernel-ReSukiSU-*.img"
